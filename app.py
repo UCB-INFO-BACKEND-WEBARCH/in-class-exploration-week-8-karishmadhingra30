@@ -1,54 +1,34 @@
 """
-Notification Service API - Starter (Synchronous)
+Notification Service API - Async with rq
 
-This version sends notifications SYNCHRONOUSLY.
-Each request blocks for 3 seconds while "sending" the notification.
-
-YOUR TASK: Convert this to use rq for background processing!
+This version sends notifications ASYNCHRONOUSLY using rq.
+Each request returns instantly with a job_id.
 """
 
 from flask import Flask, jsonify, request
-import time
+from redis import Redis
+from rq.job import Job
+import os
 import uuid
-from datetime import datetime
+from tasks import send_notification
 
 app = Flask(__name__)
+
+redis_conn = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
 # In-memory store for notifications
 notifications = {}
 
 
-def send_notification_sync(notification_id, email, message):
-    """
-    Send a notification (SLOW - blocks for 3 seconds!)
-
-    In production, this would call an email service like Mailgun.
-    We simulate the slow API with time.sleep().
-    """
-    print(f"[Sending] Notification {notification_id} to {email}...")
-
-    # This is the problem - blocking for 3 seconds!
-    time.sleep(3)
-
-    sent_at = datetime.utcnow().isoformat() + "Z"
-    print(f"[Sent] Notification {notification_id} at {sent_at}")
-
-    return {
-        "notification_id": notification_id,
-        "email": email,
-        "status": "sent",
-        "sent_at": sent_at
-    }
-
-
 @app.route('/')
 def index():
     return jsonify({
-        "service": "Notification Service (Synchronous - SLOW!)",
+        "service": "Notification Service (Async with rq!)",
         "endpoints": {
-            "POST /notifications": "Send a notification (takes 3 seconds!)",
+            "POST /notifications": "Queue a notification (returns instantly!)",
             "GET /notifications": "List all notifications",
-            "GET /notifications/<id>": "Get a notification"
+            "GET /notifications/<id>": "Get a notification",
+            "GET /jobs/<job_id>": "Check job status"
         }
     })
 
@@ -56,37 +36,31 @@ def index():
 @app.route('/notifications', methods=['POST'])
 def create_notification():
     """
-    Send a notification.
-
-    WARNING: This blocks for 3 seconds!
-    The user has to wait while we "send" the notification.
-
-    TODO: Convert this to use rq for background processing!
+    Queue a notification for background processing.
+    Returns immediately with a job_id.
     """
     data = request.get_json()
 
     if not data or 'email' not in data:
         return jsonify({"error": "Email is required"}), 400
 
-    # Create notification record
     notification_id = str(uuid.uuid4())
     email = data['email']
     message = data.get('message', 'You have a new notification!')
 
-    # THIS IS THE PROBLEM: We block here for 3 seconds!
-    # The user can't do anything while we wait.
-    result = send_notification_sync(notification_id, email, message)
+    # Queue the task — returns instantly!
+    job = send_notification.delay(notification_id, email, message)
 
     notification = {
         "id": notification_id,
         "email": email,
         "message": message,
-        "status": result['status'],
-        "sent_at": result['sent_at']
+        "status": "queued",
+        "job_id": job.id
     }
     notifications[notification_id] = notification
 
-    return jsonify(notification), 201
+    return jsonify(notification), 202
 
 
 @app.route('/notifications', methods=['GET'])
@@ -104,6 +78,29 @@ def get_notification(notification_id):
     if not notification:
         return jsonify({"error": "Notification not found"}), 404
     return jsonify(notification)
+
+
+@app.route('/jobs/<job_id>', methods=['GET'])
+def get_job_status(job_id):
+    """Check the status of a background job."""
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        return jsonify({"error": "Job not found"}), 404
+
+    status = job.get_status()
+    response = {
+        "job_id": job_id,
+        "status": str(status)
+    }
+
+    if status.value == "finished" and job.result:
+        response["result"] = job.result
+
+    if status.value == "failed":
+        response["error"] = str(job.exc_info)
+
+    return jsonify(response)
 
 
 if __name__ == '__main__':
